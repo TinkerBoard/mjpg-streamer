@@ -30,6 +30,10 @@
 #include "dynctrl.h"
 
 static int debug = 0;
+static int use_mplane = 0;
+
+#define BUF_TYPE_CAPTURE(mplane) \
+     (mplane? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE)
 
 /* fcc2s - convert pixelformat to string
 * (Obtained from vtl-utils: v4l2-ctl.cpp)
@@ -138,7 +142,7 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
 
     struct v4l2_format currentFormat;
     memset(&currentFormat, 0, sizeof(struct v4l2_format));
-    currentFormat.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	currentFormat.type = BUF_TYPE_CAPTURE(use_mplane);
     if (xioctl(vd->fd, VIDIOC_G_FMT, &currentFormat) == 0) {
         DBG("Current size: %dx%d\n",
              currentFormat.fmt.pix.width,
@@ -150,7 +154,7 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
         struct v4l2_fmtdesc fmtdesc;
         memset(&fmtdesc, 0, sizeof(struct v4l2_fmtdesc));
         fmtdesc.index = pglobal->in[id].formatCount;
-        fmtdesc.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        fmtdesc.type  = BUF_TYPE_CAPTURE(use_mplane);
         if(xioctl(vd->fd, VIDIOC_ENUM_FMT, &fmtdesc) < 0) {
             break;
         }
@@ -280,9 +284,13 @@ static int init_v4l2(struct vdIn *vd)
     }
 
     if((vd->cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0) {
-        fprintf(stderr, "Error opening device %s: video capture not supported.\n",
-                vd->videodevice);
-        goto fatal;;
+        if((vd->cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE) == 0) {
+            fprintf(stderr, "Error opening device %s: video capture not supported.\n",
+                    vd->videodevice);
+            goto fatal;;
+        } else {
+            use_mplane = 1;
+        }
     }
 
     if(vd->grabmethod) {
@@ -321,7 +329,7 @@ static int init_v4l2(struct vdIn *vd)
      * set format in
      */
     memset(&vd->fmt, 0, sizeof(struct v4l2_format));
-    vd->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    vd->fmt.type = BUF_TYPE_CAPTURE(use_mplane);
     vd->fmt.fmt.pix.width = vd->width;
     vd->fmt.fmt.pix.height = vd->height;
     vd->fmt.fmt.pix.pixelformat = vd->formatIn;
@@ -385,7 +393,7 @@ static int init_v4l2(struct vdIn *vd)
         struct v4l2_streamparm *setfps;
         setfps = (struct v4l2_streamparm *) calloc(1, sizeof(struct v4l2_streamparm));
         memset(setfps, 0, sizeof(struct v4l2_streamparm));
-        setfps->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        setfps->type = BUF_TYPE_CAPTURE(use_mplane);
 
         /*
         * first query streaming parameters to determine that the FPS selection is supported
@@ -394,7 +402,7 @@ static int init_v4l2(struct vdIn *vd)
         if (ret == 0) {
             if (setfps->parm.capture.capability & V4L2_CAP_TIMEPERFRAME) {
                 memset(setfps, 0, sizeof(struct v4l2_streamparm));
-                setfps->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                setfps->type = BUF_TYPE_CAPTURE(use_mplane);
                 setfps->parm.capture.timeperframe.numerator = 1;
                 setfps->parm.capture.timeperframe.denominator = vd->fps==-1?255:vd->fps; // if no default fps set set it to maximum
 
@@ -422,7 +430,7 @@ static int init_v4l2(struct vdIn *vd)
      */
     memset(&vd->rb, 0, sizeof(struct v4l2_requestbuffers));
     vd->rb.count = NB_BUFFER;
-    vd->rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    vd->rb.type = BUF_TYPE_CAPTURE(use_mplane);
     vd->rb.memory = V4L2_MEMORY_MMAP;
 
     ret = xioctl(vd->fd, VIDIOC_REQBUFS, &vd->rb);
@@ -435,10 +443,16 @@ static int init_v4l2(struct vdIn *vd)
      * map the buffers
      */
     for(i = 0; i < NB_BUFFER; i++) {
+		struct v4l2_plane planes[4];
+		
         memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
         vd->buf.index = i;
-        vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        vd->buf.type = BUF_TYPE_CAPTURE(use_mplane);
         vd->buf.memory = V4L2_MEMORY_MMAP;
+		if(use_mplane) {
+            vd->buf.length = 1; 
+            vd->buf.m.planes = planes; 
+        }
         ret = xioctl(vd->fd, VIDIOC_QUERYBUF, &vd->buf);
         if(ret < 0) {
             perror("Unable to query buffer");
@@ -448,9 +462,15 @@ static int init_v4l2(struct vdIn *vd)
         if(debug)
             fprintf(stderr, "length: %u offset: %u\n", vd->buf.length, vd->buf.m.offset);
 
-        vd->mem[i] = mmap(0 /* start anywhere */ ,
+		if(use_mplane) {
+            vd->mem[i] = mmap(0 /* start anywhere */ ,
+                            vd->buf.m.planes[0].length, PROT_READ | PROT_WRITE, MAP_SHARED, vd->fd,
+                            vd->buf.m.planes[0].m.mem_offset);
+        } else {
+        	vd->mem[i] = mmap(0 /* start anywhere */ ,
                           vd->buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, vd->fd,
                           vd->buf.m.offset);
+        }
         if(vd->mem[i] == MAP_FAILED) {
             perror("Unable to map buffer");
             goto fatal;
@@ -463,10 +483,16 @@ static int init_v4l2(struct vdIn *vd)
      * Queue the buffers.
      */
     for(i = 0; i < NB_BUFFER; ++i) {
+		struct v4l2_plane planes[4];
+
         memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
         vd->buf.index = i;
-        vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        vd->buf.type = BUF_TYPE_CAPTURE(use_mplane);
         vd->buf.memory = V4L2_MEMORY_MMAP;
+		if(use_mplane) {
+            vd->buf.m.planes = planes;
+            vd->buf.length = 1;
+        }
         ret = xioctl(vd->fd, VIDIOC_QBUF, &vd->buf);
         if(ret < 0) {
             perror("Unable to queue buffer");
@@ -482,7 +508,7 @@ fatal:
 
 int video_enable(struct vdIn *vd)
 {
-    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    int type = BUF_TYPE_CAPTURE(use_mplane);
     int ret;
 
     ret = xioctl(vd->fd, VIDIOC_STREAMON, &type);
@@ -496,7 +522,7 @@ int video_enable(struct vdIn *vd)
 
 static int video_disable(struct vdIn *vd, streaming_state disabledState)
 {
-    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    int type = BUF_TYPE_CAPTURE(use_mplane);
     int ret;
     DBG("STopping capture\n");
     ret = xioctl(vd->fd, VIDIOC_STREAMOFF, &type);
@@ -609,14 +635,21 @@ int uvcGrab(struct vdIn *vd)
 {
 #define HEADERFRAME1 0xaf
     int ret;
+	struct v4l2_plane planes[4];
+
 
     if(vd->streamingState == STREAMING_OFF) {
         if(video_enable(vd))
             goto err;
     }
     memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
-    vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    vd->buf.type = BUF_TYPE_CAPTURE(use_mplane);
     vd->buf.memory = V4L2_MEMORY_MMAP;
+
+	if(use_mplane) {
+		vd->buf.m.planes = planes;
+		vd->buf.length = 1;
+	}
 
     ret = xioctl(vd->fd, VIDIOC_DQBUF, &vd->buf);
     if(ret < 0) {
@@ -642,9 +675,15 @@ int uvcGrab(struct vdIn *vd)
         memcpy (vd->tmpbuffer + HEADERFRAME1 + sizeof(dht_data), vd->mem[vd->buf.index] + HEADERFRAME1, (vd->buf.bytesused - HEADERFRAME1));
         */
 
-        memcpy(vd->tmpbuffer, vd->mem[vd->buf.index], vd->buf.bytesused);
-        vd->tmpbytesused = vd->buf.bytesused;
-        vd->tmptimestamp = vd->buf.timestamp;
+		if(use_mplane) {
+            memcpy(vd->tmpbuffer, vd->mem[vd->buf.index], vd->buf.m.planes[0].bytesused);
+            vd->tmpbytesused = vd->buf.m.planes[0].bytesused;
+            vd->tmptimestamp = vd->buf.timestamp;
+        } else {
+    	    memcpy(vd->tmpbuffer, vd->mem[vd->buf.index], vd->buf.bytesused);
+	        vd->tmpbytesused = vd->buf.bytesused;
+        	vd->tmptimestamp = vd->buf.timestamp;
+        }
 
         if(debug) {
             fprintf(stderr, "bytes in used %d \n", vd->buf.bytesused);
@@ -653,10 +692,14 @@ int uvcGrab(struct vdIn *vd)
     case V4L2_PIX_FMT_RGB565:
     case V4L2_PIX_FMT_YUYV:
     case V4L2_PIX_FMT_UYVY:
-        if(vd->buf.bytesused > vd->framesizeIn) {
-            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->framesizeIn);
+		if(use_mplane) {
+            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->buf.m.planes[0].bytesused);
         } else {
-            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->buf.bytesused);
+	        if(vd->buf.bytesused > vd->framesizeIn) {
+	            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->framesizeIn);
+	        } else {
+	            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->buf.bytesused);
+	        }
         }
         vd->tmpbytesused = vd->buf.bytesused;
         vd->tmptimestamp = vd->buf.timestamp;
