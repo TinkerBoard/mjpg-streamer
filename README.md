@@ -50,7 +50,7 @@ Building & Installation
 You must have cmake installed. You will also probably want to have a development
 version of libjpeg installed. I used libjpeg8-dev. e.g.
 
-    sudo apt-get install cmake libjpeg8-dev
+    sudo apt-get install cmake libjpeg62-turbo-dev
 
 If you do not have gcc (and g++ for the opencv plugin) you may need to install those.
 
@@ -92,7 +92,7 @@ From the mjpeg streamer experimental
 folder:
 ```
 export LD_LIBRARY_PATH=.
-./mjpg_streamer -o "output_http.so -w ./www" -i "input_raspicam.so"
+./mjpg_streamer -o "output_http.so -w ./www" -i "input_uvc.so -y"
 ```
 
 See [README.md](mjpg-streamer-experimental/README.md) or the individual plugin's documentation for more details.
